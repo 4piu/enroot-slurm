@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+# BASH_ENV trampoline used by the sbatch wrapper for ordinary Bash scripts.
+if [[ ${DEVBOX_BATCH_REQUESTED:-0} == 1 && ${DEVBOX_ACTIVE:-0} != 1 ]]; then
+    mapfile -d '' -t command_line < "/proc/$$/cmdline"
+    batch_script=${command_line[1]}
+
+    if [[ $batch_script != /var/spool/slurmd/job*/slurm_script || ! -r $batch_script ]]; then
+        printf 'devbox batch bootstrap: cannot identify the Slurm spool script\n' >&2
+        exit 70
+    fi
+
+    launcher="$HOME/.local/bin/devbox"
+    unset BASH_ENV DEVBOX_ACTIVE DEVBOX_ROOTFS_KIND DEVBOX_BATCH_REQUESTED
+    exec "$launcher" --batch /bin/bash -s -- "$@" < "$batch_script"
+fi

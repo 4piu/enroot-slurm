@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+# Forced-command dispatcher for separate rescue and development SSH keys.
+set -euo pipefail
+
+mode=${1:?expected host or devbox mode}
+DEVBOX_HOST_HOME=$HOME
+DEVBOX_HOST_USER=${USER:-${HOME##*/}}
+config=${DEVBOX_CONFIG:-$HOME/.config/enroot-slurm/devbox.conf}
+# shellcheck source=/dev/null
+source "$config"
+
+run_host_command()
+{
+    if [[ ${SSH_ORIGINAL_COMMAND:-} == internal-sftp ]]; then
+        exec "$DEVBOX_HOST_SFTP_SERVER"
+    fi
+    if [[ -n ${SSH_ORIGINAL_COMMAND:-} ]]; then
+        exec /bin/bash -lc "$SSH_ORIGINAL_COMMAND"
+    fi
+    exec /bin/bash -l
+}
+
+case $mode in
+    host)
+        run_host_command
+        ;;
+    devbox)
+        if [[ ${SSH_ORIGINAL_COMMAND:-} == internal-sftp ]]; then
+            exec "$HOME/.local/bin/devbox" --session "$DEVBOX_CONTAINER_SFTP_SERVER"
+        fi
+        if [[ -n ${SSH_ORIGINAL_COMMAND:-} ]]; then
+            exec "$HOME/.local/bin/devbox" --session /bin/bash -lc "$SSH_ORIGINAL_COMMAND"
+        fi
+        exec "$HOME/.local/bin/devbox" --session /bin/bash -l
+        ;;
+    *)
+        printf 'devbox-ssh: expected host or devbox mode\n' >&2
+        exit 64
+        ;;
+esac

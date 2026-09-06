@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+# Install the repository scripts. Run this from the host account, not devbox.
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+config_source=${1:-$repo_dir/config/devbox.conf}
+config_target="$HOME/.config/enroot-slurm/devbox.conf"
+
+if [[ ! -r $config_source ]]; then
+    printf 'install: create %s from config/devbox.conf.example first\n' "$config_source" >&2
+    exit 66
+fi
+
+install -d "$HOME/.local/bin" "$HOME/.config/enroot-slurm"
+install -m 0644 "$config_source" "$config_target"
+
+DEVBOX_HOST_HOME=$HOME
+DEVBOX_HOST_USER=${USER:-${HOME##*/}}
+# shellcheck source=/dev/null
+source "$config_target"
+
+install -m 0755 "$repo_dir/scripts/devbox" "$HOME/.local/bin/devbox"
+install -m 0755 "$repo_dir/scripts/devbox-ssh" "$HOME/.local/bin/devbox-ssh"
+install -m 0644 "$repo_dir/scripts/devbox-batch-env" "$HOME/.config/enroot-slurm/devbox-batch-env"
+
+install -d "$DEVBOX_PRIVATE_HOME/.local/bin"
+install -m 0755 "$repo_dir/scripts/sbatch" "$DEVBOX_PRIVATE_HOME/.local/bin/sbatch"
+install -m 0755 "$repo_dir/scripts/srun" "$DEVBOX_PRIVATE_HOME/.local/bin/srun"
+
+printf 'Installed devbox scripts. Configure SSH forced commands separately.\n'

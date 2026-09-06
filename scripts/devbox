@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+# Start one persistent writable development rootfs or an immutable batch image.
+set -euo pipefail
+
+mode=auto
+case ${1-} in
+    --writable)
+        mode=writable
+        shift
+        ;;
+    --batch)
+        mode=batch
+        shift
+        ;;
+    --session)
+        mode=session
+        shift
+        ;;
+    --help|-h)
+        cat <<'EOF'
+Usage: devbox [--writable|--batch|--session] [--] [COMMAND [ARG...]]
+
+The default is a writable named rootfs outside Slurm and an immutable image
+inside a Slurm allocation. --session shares a private /tmp between independent
+SSH sessions. Configuration is read from ~/.config/enroot-slurm/devbox.conf.
+EOF
+        exit 0
+        ;;
+esac
+if [[ ${1-} == -- ]]; then
+    shift
+fi
+
+if [[ ${DEVBOX_ACTIVE:-0} == 1 ]]; then
+    if (($#)); then
+        exec "$@"
+    fi
+    exec /bin/bash -i
+fi
+
+DEVBOX_HOST_HOME=${DEVBOX_HOST_HOME:-${HOME:?HOME is not set}}
+DEVBOX_HOST_USER=${DEVBOX_HOST_USER:-${DEVBOX_HOST_HOME##*/}}
+config=${DEVBOX_CONFIG:-$DEVBOX_HOST_HOME/.config/enroot-slurm/devbox.conf}
+if [[ ! -r $config ]]; then
+    printf 'devbox: configuration is not readable: %s\n' "$config" >&2
+    exit 78
+fi
+# shellcheck source=/dev/null
+source "$config"
+
+: "${DEVBOX_NAME:?DEVBOX_NAME is not configured}"
+: "${DEVBOX_PRIVATE_HOME:?DEVBOX_PRIVATE_HOME is not configured}"
+: "${DEVBOX_CONTAINER_HOME:?DEVBOX_CONTAINER_HOME is not configured}"
+: "${DEVBOX_SNAPSHOT:?DEVBOX_SNAPSHOT is not configured}"
+: "${DEVBOX_ENROOT_BIN:?DEVBOX_ENROOT_BIN is not configured}"
+: "${DEVBOX_ENROOT_LIBRARY_PATH:?DEVBOX_ENROOT_LIBRARY_PATH is not configured}"
+: "${DEVBOX_ENROOT_SYSCONF_PATH:?DEVBOX_ENROOT_SYSCONF_PATH is not configured}"
+: "${DEVBOX_ENROOT_DATA_PATH:?DEVBOX_ENROOT_DATA_PATH is not configured}"
+: "${DEVBOX_HOST_TMPDIR:?DEVBOX_HOST_TMPDIR is not configured}"
+: "${DEVBOX_SLURM_BIN_DIR:?DEVBOX_SLURM_BIN_DIR is not configured}"
+: "${DEVBOX_CONTAINER_PATH:?DEVBOX_CONTAINER_PATH is not configured}"
+
+if [[ -e ${DEVBOX_DISABLE_FILE:-} || -n ${DEVBOX_SCRATCH_DISABLE_FILE:-} && -e $DEVBOX_SCRATCH_DISABLE_FILE ]]; then
+    printf 'devbox: disabled by a recovery switch\n' >&2
+    exit 70
+fi
+
+# Host-side Enroot paths must be explicit. In particular, changing HOME to the
+# private home below must not move the named rootfs to a different data store.
+export PATH="$DEVBOX_HOST_HOME/.local/bin:$PATH"
+export ENROOT_LIBRARY_PATH=$DEVBOX_ENROOT_LIBRARY_PATH
+export ENROOT_SYSCONF_PATH=$DEVBOX_ENROOT_SYSCONF_PATH
+export ENROOT_CONFIG_PATH=${DEVBOX_ENROOT_CONFIG_PATH:-$DEVBOX_HOST_HOME/.config/enroot}
+export ENROOT_CACHE_PATH=${DEVBOX_ENROOT_CACHE_PATH:-$DEVBOX_HOST_HOME/.cache/enroot}
+export ENROOT_DATA_PATH=$DEVBOX_ENROOT_DATA_PATH
+export XDG_RUNTIME_DIR="$DEVBOX_HOST_TMPDIR/enroot-runtime"
+export ENROOT_RUNTIME_PATH="$XDG_RUNTIME_DIR/enroot"
+export ENROOT_TEMP_PATH=${DEVBOX_ENROOT_TEMP_PATH:-$DEVBOX_HOST_TMPDIR}
+
+mkdir -p "$DEVBOX_PRIVATE_HOME" "$XDG_RUNTIME_DIR"
+
+if [[ $mode == session ]]; then
+    session_tmp="$DEVBOX_HOST_TMPDIR/devbox-session-tmp"
+    mkdir -p "$session_tmp"
+    chmod 700 "$session_tmp"
+fi
+
+enroot_args=(
+    --mount "$DEVBOX_PRIVATE_HOME:$DEVBOX_CONTAINER_HOME"
+    --mount "$DEVBOX_HOST_HOME/.local/bin/devbox:/usr/local/bin/devbox"
+    --env "HOME=$DEVBOX_CONTAINER_HOME"
+    --env USER=root
+    --env LOGNAME=root
+    --env DEVBOX_ACTIVE=1
+    --env "DEVBOX_HOST_HOME=$DEVBOX_HOST_HOME"
+    --env "DEVBOX_HOST_USER=$DEVBOX_HOST_USER"
+    --env "DEVBOX_SBATCH_BIN=$DEVBOX_SLURM_BIN_DIR/sbatch"
+    --env "DEVBOX_SRUN_BIN=$DEVBOX_SLURM_BIN_DIR/srun"
+    --env "DEVBOX_HOST_DEVBOX=$DEVBOX_HOST_HOME/.local/bin/devbox"
+    --env "DEVBOX_HOST_BATCH_ENV=$DEVBOX_HOST_HOME/.config/enroot-slurm/devbox-batch-env"
+    --env "DEVBOX_SRUN_MPI=${DEVBOX_SRUN_MPI:-}"
+    --env BASH_ENV=
+    --env "PATH=$DEVBOX_CONTAINER_PATH"
+)
+
+if [[ -n ${DEVBOX_CONTAINER_LD_LIBRARY_PATH:-} ]]; then
+    enroot_args+=(--env "LD_LIBRARY_PATH=$DEVBOX_CONTAINER_LD_LIBRARY_PATH")
+fi
+if [[ $mode == session ]]; then
+    enroot_args+=(--mount "$session_tmp:/tmp")
+fi
+if [[ -n ${DEVBOX_SCRATCH_PATH:-} ]]; then
+    enroot_args+=(--mount "$DEVBOX_SCRATCH_PATH:$DEVBOX_SCRATCH_PATH")
+fi
+while IFS= read -r mount; do
+    [[ -n $mount ]] && enroot_args+=(--mount "$mount")
+done <<< "${DEVBOX_EXTRA_MOUNTS:-}"
+
+# The NVIDIA hook uses the allocation produced by Slurm. Avoid probing GPUs on
+# login nodes and CPU-only allocations.
+if [[ -n ${CUDA_VISIBLE_DEVICES:-} && ${CUDA_VISIBLE_DEVICES} != NoDevFiles ]]; then
+    export NVIDIA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES
+    export NVIDIA_DRIVER_CAPABILITIES=compute,utility
+else
+    export NVIDIA_VISIBLE_DEVICES=void
+    unset NVIDIA_DRIVER_CAPABILITIES || true
+fi
+enroot_args+=(--env "NVIDIA_VISIBLE_DEVICES=$NVIDIA_VISIBLE_DEVICES")
+if [[ -n ${NVIDIA_DRIVER_CAPABILITIES:-} ]]; then
+    enroot_args+=(--env "NVIDIA_DRIVER_CAPABILITIES=$NVIDIA_DRIVER_CAPABILITIES")
+fi
+
+# Preserve scheduler metadata and common distributed-computing controls. Do
+# not forward the host PATH or host-wide LD_LIBRARY_PATH.
+while IFS= read -r variable; do
+    enroot_args+=(--env "$variable")
+done < <(compgen -e | grep -E '^(SLURM_|SSH_|TERM$|COLORTERM$|LANG$|LC_|CUDA_VISIBLE_DEVICES$|OMP_|NCCL_|UCX_|PMI_|PMIX_|MASTER_(ADDR|PORT)$)' || true)
+
+for variable in ${DEVBOX_FORWARD_ENV:-}; do
+    if [[ $variable =~ ^[[:alpha:]_][[:alnum:]_]*$ ]] && [[ -v $variable ]]; then
+        enroot_args+=(--env "$variable")
+    fi
+done
+
+if [[ $PWD == "$DEVBOX_PRIVATE_HOME" ]]; then
+    container_cwd=$DEVBOX_CONTAINER_HOME
+    host_cwd=$DEVBOX_PRIVATE_HOME
+elif [[ $PWD == "$DEVBOX_PRIVATE_HOME/"* ]]; then
+    container_cwd="$DEVBOX_CONTAINER_HOME/${PWD#"$DEVBOX_PRIVATE_HOME/"}"
+    host_cwd=$PWD
+elif [[ -n ${DEVBOX_SCRATCH_PATH:-} && ($PWD == "$DEVBOX_SCRATCH_PATH" || $PWD == "$DEVBOX_SCRATCH_PATH/"*) ]]; then
+    container_cwd=$PWD
+    host_cwd=$PWD
+else
+    container_cwd=$DEVBOX_CONTAINER_HOME
+    host_cwd=$DEVBOX_PRIVATE_HOME
+fi
+enroot_args+=(--env "DEVBOX_START_CWD=$container_cwd")
+enroot_args+=(--env "DEVBOX_HOST_CWD=$host_cwd")
+
+if [[ $mode == session ]]; then
+    enroot_args+=(--rw --root)
+    target=$DEVBOX_NAME
+    rootfs_kind=named-rw-session
+elif [[ $mode == writable || ($mode == auto && -z ${SLURM_JOB_ID:-}) ]]; then
+    enroot_args+=(--rw --root)
+    target=$DEVBOX_NAME
+    rootfs_kind=named-rw
+else
+    enroot_args+=(--root)
+    if [[ ! -r $DEVBOX_SNAPSHOT ]]; then
+        printf 'devbox: immutable image is not readable: %s\n' "$DEVBOX_SNAPSHOT" >&2
+        exit 70
+    fi
+    target=$DEVBOX_SNAPSHOT
+    rootfs_kind=snapshot
+fi
+enroot_args+=(--env "DEVBOX_ROOTFS_KIND=$rootfs_kind")
+
+# Enroot's standard hooks must see the private home, never the account home.
+export HOME=$DEVBOX_PRIVATE_HOME
+
+exec "$DEVBOX_ENROOT_BIN" start "${enroot_args[@]}" "$target" \
+    /bin/bash -c '
+        cd "$DEVBOX_START_CWD" || exit 72
+        if (($#)); then
+            exec "$@"
+        fi
+        exec /bin/bash -i
+    ' devbox "$@"

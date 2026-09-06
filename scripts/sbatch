@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+
+# Submit Bash scripts and --wrap payloads through the immutable devbox image.
+set -euo pipefail
+
+: "${DEVBOX_HOST_HOME:?run sbatch from a devbox session}"
+: "${DEVBOX_HOST_CWD:?DEVBOX_HOST_CWD is not set}"
+: "${DEVBOX_SBATCH_BIN:?DEVBOX_SBATCH_BIN is not set}"
+: "${DEVBOX_HOST_DEVBOX:?DEVBOX_HOST_DEVBOX is not set}"
+: "${DEVBOX_HOST_BATCH_ENV:?DEVBOX_HOST_BATCH_ENV is not set}"
+
+args=("$@")
+has_wrap=0
+
+for argument in "${args[@]}"; do
+    case $argument in
+        --export|--export=*|--export-file|--export-file=*|--get-user-env|--get-user-env=*)
+            printf 'sbatch: environment export options bypass the devbox bootstrap\n' >&2
+            exit 64
+            ;;
+    esac
+done
+
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case ${args[i]} in
+        --wrap=*)
+            has_wrap=1
+            payload=${args[i]#--wrap=}
+            printf -v wrapped '%q ' "$DEVBOX_HOST_DEVBOX" --batch /bin/bash -lc "$payload"
+            args[i]="--wrap=${wrapped% }"
+            ;;
+        --wrap)
+            has_wrap=1
+            ((i + 1 < ${#args[@]})) || { printf 'sbatch: --wrap requires an argument\n' >&2; exit 64; }
+            payload=${args[i+1]}
+            printf -v wrapped '%q ' "$DEVBOX_HOST_DEVBOX" --batch /bin/bash -lc "$payload"
+            args[i+1]=${wrapped% }
+            ((i++))
+            ;;
+    esac
+done
+
+if ((!has_wrap)); then
+    submission_script=
+    for argument in "${args[@]}"; do
+        [[ $argument == -* ]] && continue
+        if [[ -f $argument && -r $argument ]]; then
+            submission_script=$argument
+            break
+        fi
+    done
+    if [[ -z $submission_script ]]; then
+        printf 'sbatch: provide a readable Bash script or --wrap\n' >&2
+        exit 64
+    fi
+    IFS= read -r shebang < "$submission_script" || true
+    case $shebang in
+        '#!'*/bash|'#!'*/bash\ *|'#!'*/env\ bash|'#!'*/env\ bash\ *|'#!'*/env\ -S\ bash|'#!'*/env\ -S\ bash\ *) ;;
+        *)
+            printf 'sbatch: submission script must use Bash: %s\n' "$submission_script" >&2
+            exit 64
+            ;;
+    esac
+fi
+
+unset DEVBOX_ACTIVE DEVBOX_ROOTFS_KIND
+if ((has_wrap)); then
+    export BASH_ENV=
+    export DEVBOX_BATCH_REQUESTED=0
+else
+    export BASH_ENV=$DEVBOX_HOST_BATCH_ENV
+    export DEVBOX_BATCH_REQUESTED=1
+fi
+
+exec "$DEVBOX_SBATCH_BIN" --chdir="$DEVBOX_HOST_CWD" "${args[@]}"

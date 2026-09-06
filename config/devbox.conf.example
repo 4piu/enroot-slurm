@@ -1,0 +1,54 @@
+# Host-side configuration for the devbox scripts.
+#
+# This file is sourced by Bash. Values may reference DEVBOX_HOST_HOME and
+# DEVBOX_HOST_USER, which the launcher defines before loading the file.
+
+DEVBOX_NAME=devbox
+DEVBOX_PRIVATE_HOME="$DEVBOX_HOST_HOME/enroot_home"
+DEVBOX_CONTAINER_HOME=/root
+DEVBOX_SNAPSHOT="$DEVBOX_HOST_HOME/devbox.sqsh"
+
+# User-local Enroot installation. Adjust these together if Enroot is installed
+# under another prefix.
+DEVBOX_ENROOT_BIN="$DEVBOX_HOST_HOME/.local/bin/enroot"
+DEVBOX_ENROOT_LIBRARY_PATH="$DEVBOX_HOST_HOME/.local/lib/enroot"
+DEVBOX_ENROOT_SYSCONF_PATH="$DEVBOX_HOST_HOME/.local/etc/enroot"
+DEVBOX_ENROOT_CONFIG_PATH="$DEVBOX_HOST_HOME/.config/enroot"
+DEVBOX_ENROOT_CACHE_PATH="$DEVBOX_HOST_HOME/.cache/enroot"
+DEVBOX_ENROOT_DATA_PATH="$DEVBOX_HOST_HOME/.local/share/enroot"
+DEVBOX_HOST_TMPDIR="/tmp/$DEVBOX_HOST_USER"
+
+# Slurm client installation visible on both login and compute nodes.
+DEVBOX_SLURM_BIN_DIR=/usr/bin
+
+# Optional storage mounted at the same absolute path inside the container.
+# Leave empty when the cluster has no separate project/scratch filesystem.
+DEVBOX_SCRATCH_PATH=
+
+# One source:destination pair per line. Add the Slurm installation, Slurm's
+# node-local configuration, Munge socket/library, or other site dependencies
+# needed to run srun from inside the container. Paths must exist on every node
+# on which the launcher runs.
+DEVBOX_EXTRA_MOUNTS=
+# Example:
+# DEVBOX_EXTRA_MOUNTS=$'/opt/slurm:/opt/slurm\n/run/munge:/run/munge'
+
+DEVBOX_CONTAINER_PATH="$DEVBOX_CONTAINER_HOME/.local/bin:$DEVBOX_SLURM_BIN_DIR:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+DEVBOX_CONTAINER_LD_LIBRARY_PATH=
+
+# Set to "none" when the site's default srun MPI plugin links host libraries
+# unavailable in the image. Leave empty to preserve the cluster default.
+DEVBOX_SRUN_MPI=
+
+# Additional host variables to pass through, separated by whitespace.
+DEVBOX_FORWARD_ENV=
+
+# OpenSSH commonly installs sftp-server at different paths on the host and in
+# the image.
+DEVBOX_HOST_SFTP_SERVER=/usr/libexec/openssh/sftp-server
+DEVBOX_CONTAINER_SFTP_SERVER=/usr/lib/openssh/sftp-server
+
+# Recovery switches. The host switch is reachable through the rescue SSH key;
+# the optional scratch switch is also reachable from inside the container.
+DEVBOX_DISABLE_FILE="$DEVBOX_HOST_HOME/.disable-enroot"
+DEVBOX_SCRATCH_DISABLE_FILE=

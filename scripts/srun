@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+
+# Run every Slurm job step through the immutable devbox image.
+set -euo pipefail
+
+: "${DEVBOX_HOST_CWD:?run srun from a devbox session}"
+: "${DEVBOX_SRUN_BIN:?DEVBOX_SRUN_BIN is not set}"
+: "${DEVBOX_HOST_DEVBOX:?DEVBOX_HOST_DEVBOX is not set}"
+
+slurm_args=()
+command_args=()
+found_delimiter=0
+has_mpi_option=0
+
+for argument in "$@"; do
+    if ((found_delimiter)); then
+        command_args+=("$argument")
+    elif [[ $argument == -- ]]; then
+        found_delimiter=1
+    else
+        slurm_args+=("$argument")
+        [[ $argument == --mpi || $argument == --mpi=* ]] && has_mpi_option=1
+    fi
+done
+
+if ((!found_delimiter || ${#command_args[@]} == 0)); then
+    printf 'Usage: srun [SLURM OPTIONS] -- COMMAND [ARG...]\n' >&2
+    exit 64
+fi
+
+unset DEVBOX_ACTIVE DEVBOX_ROOTFS_KIND
+if ((!has_mpi_option)) && [[ -n ${DEVBOX_SRUN_MPI:-} ]]; then
+    slurm_args+=("--mpi=$DEVBOX_SRUN_MPI")
+fi
+
+exec "$DEVBOX_SRUN_BIN" \
+    --chdir="$DEVBOX_HOST_CWD" \
+    "${slurm_args[@]}" -- \
+    "$DEVBOX_HOST_DEVBOX" --batch "${command_args[@]}"
